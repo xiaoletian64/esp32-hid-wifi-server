@@ -101,11 +101,10 @@ struct ContentView: View {
                     }
                 }
                 Section("按键") {
-                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())]) {
-                        ForEach([["VOLUME_UP", "音量+"], ["VOLUME_DOWN", "音量-"], ["MUTE", "静音"]], id: \.0) { pair in
-                            Button(pair[1]) { Task { await bridge.send("key", ["key": pair[0]]) } }
-                                .buttonStyle(.bordered)
-                        }
+                    HStack {
+                        Button("音量+") { Task { await bridge.send("key", ["key": "VOLUME_UP"]) } }.buttonStyle(.bordered)
+                        Button("音量-") { Task { await bridge.send("key", ["key": "VOLUME_DOWN"]) } }.buttonStyle(.bordered)
+                        Button("静音") { Task { await bridge.send("key", ["key": "MUTE"]) } }.buttonStyle(.bordered)
                     }
                 }
                 Section {
