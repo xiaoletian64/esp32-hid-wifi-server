@@ -1,0 +1,37 @@
+name: ios
+
+on:
+  push:
+    branches: [main]
+    paths: ["ios/**", ".github/workflows/ios.yml"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build PhoneBridge (unsigned ipa)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate Xcode project
+        run: brew install xcodegen && cd ios && xcodegen generate
+
+      - name: Build (no signing)
+        run: |
+          cd ios
+          xcodebuild -project PhoneBridge.xcodeproj -scheme PhoneBridge \
+            -destination "generic/platform=iOS" -configuration Release build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
+            -derivedDataPath build | tail -20
+
+      - name: Package unsigned ipa
+        run: |
+          mkdir -p Payload
+          cp -r ios/build/Build/Products/Release-iphoneos/PhoneBridge.app Payload/
+          zip -qry PhoneBridge-unsigned.ipa Payload
+          ls -la PhoneBridge-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PhoneBridge-unsigned-ipa
+          path: PhoneBridge-unsigned.ipa

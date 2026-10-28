@@ -1,0 +1,10 @@
+name: PhoneBridge
+options:
+  bundleIdPrefix: site.zhangyue
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  PhoneBridge:
+    type: application
+    platform: iOS
+    sources: [PhoneBridge]
