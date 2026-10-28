@@ -17,7 +17,7 @@ final class Bridge: ObservableObject {
     @Published var lastResult = ""
 
     private var guardHeader: String {
-        SHA256(hash: Data(token.utf8)).map { String(format: "%02x", $0) }.joined()
+        SHA256.hash(data: Data(token.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
     func refresh() async {
