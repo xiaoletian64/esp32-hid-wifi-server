@@ -48,6 +48,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import socket
 import socketserver
 import struct
@@ -111,7 +112,7 @@ class PolicyError(Exception):
     pass
 
 
-def validate_command(cmd):
+def validate_command(cmd, ota_prefix=""):
     """Return (op, cleaned_dict) or raise PolicyError."""
     op = cmd.get("op")
     if not isinstance(op, str):
@@ -177,6 +178,21 @@ def validate_command(cmd):
 
     if op == "ping":
         return op, {}
+
+    if op == "ota":
+        # 远程固件升级。两层白名单：
+        #   服务端：url 必须以 --ota-prefix 开头（默认 http://<bind>:8766/）
+        #   固件侧：url 必须以 config.h 的 OTA_URL_PREFIX 开头，二次校验
+        # md5 是 32 位 hex，固件/agent 用来核对升级产物。
+        url = cmd.get("url")
+        md5 = cmd.get("md5")
+        if not ota_prefix:
+            raise PolicyError("ota disabled on this server (no --ota-prefix)")
+        if not isinstance(url, str) or not url.startswith(ota_prefix) or len(url) > 200:
+            raise PolicyError(f"ota 'url' must start with {ota_prefix!r} and be <=200 chars")
+        if not isinstance(md5, str) or not re.fullmatch(r"[0-9a-f]{32}", md5):
+            raise PolicyError("'md5' must be 32 lowercase hex chars")
+        return op, {"url": url, "md5": md5}
 
     raise PolicyError(f"unknown op: {op!r}")
 
@@ -483,17 +499,18 @@ def urllib_unquote(s):
 
 
 class Config:
-    def __init__(self, token, guard_header, audit_path, trusted_peers):
+    def __init__(self, token, guard_header, audit_path, trusted_peers, ota_prefix=""):
         self.token = token
         self.guard_header = guard_header
         self.audit = Audit(audit_path)
         self.trusted_peers = trusted_peers
+        self.ota_prefix = ota_prefix
         self.limiter = RateLimiter()
         self.board = Board(self.audit)
 
     def submit(self, cmd):
         try:
-            op, payload = validate_command(cmd)
+            op, payload = validate_command(cmd, self.ota_prefix)
         except PolicyError as e:
             self.audit.write("cmd_rejected", {"cmd": cmd, "reason": str(e)})
             return 400, {"error": str(e)}
@@ -552,6 +569,9 @@ def main():
                     help="default: $XDG_STATE_HOME/esp32-hid-bridge/audit.jsonl")
     ap.add_argument("--listen-lan", action="store_true",
                     help="allow POST /cmd from --bind's address (default: loopback only)")
+    ap.add_argument("--ota-prefix", default=None,
+                    help="allowed URL prefix for the 'ota' op "
+                         "(default: http://<bind>:8766/). Empty string disables OTA.")
     args = ap.parse_args()
 
     # Environment overrides so a systemd unit can carry the config.
@@ -568,6 +588,8 @@ def main():
             "esp32-hid-bridge", "audit.jsonl")
     if args.port == 8765 and os.environ.get("BRIDGE_PORT"):
         args.port = int(os.environ["BRIDGE_PORT"])
+    if args.ota_prefix is None:
+        args.ota_prefix = os.environ.get("BRIDGE_OTA_PREFIX") or f"http://{args.bind}:8766/"
 
     if args.bind in ("0.0.0.0", "::"):
         sys.exit("refusing to bind 0.0.0.0 — pass an explicit LAN address")
@@ -595,7 +617,7 @@ def main():
     if args.listen_lan:
         trusted.add(args.bind)
 
-    cfg = Config(token, guard_header, args.audit, trusted)
+    cfg = Config(token, guard_header, args.audit, trusted, ota_prefix=args.ota_prefix)
     httpd = Server((args.bind, args.port), Handler)
     httpd.cfg = cfg
 

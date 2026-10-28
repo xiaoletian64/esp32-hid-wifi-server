@@ -9,9 +9,11 @@
 #   lib : ESP32-BLE-HID            源码安装（不在库管理器里），见下面 install_lib()
 #
 # 用法：
-#   ./build_firmware.sh build            # 只编译
+#   ./build_firmware.sh build            # 只编译（上游 no_ota 单分区，无 OTA）
+#   ./build_firmware.sh build-ota [c3|s3]  # 编译 OTA 版（factory+ota_1，默认 c3）
 #   ./build_firmware.sh upload           # 编译 + 用 arduino-cli 烧录
 #   ./build_firmware.sh upload-flash     # 编译 + esptool 手动烧（绕过坏 bootloader，推荐）
+#   ./build_firmware.sh flash-ota [c3|s3]  # OTA 版首烧：esptool 烧 factory+ota_1 表
 #   ./build_firmware.sh size             # 只看体积
 #   ./build_firmware.sh install-lib      # 装 ESP32-BLE-HID 库（只需一次）
 #
@@ -155,6 +157,93 @@ EOF
   fi
 }
 
+# ------------------------------------------------------------ OTA 版 -------
+
+PART_CSV_OTA_SRC="$(cd "$(dirname "$0")" && pwd)/partitions_ota.csv"
+PART_CSV_OTA="$BUILD_DIR/partitions_ota.csv"
+PART_BIN_OTA="$BUILD_DIR/partitions_ota.bin"
+
+# arduino-cli 编译自定义分区表：fqbn 菜单属性（PartitionScheme=...）会覆盖
+# --build-property build.partitions，所以自定义表必须**顶替某张官方表的名字**。
+# 这里顶替 no_ota.csv（2MB 单槽那版，原版备份为 no_ota.csv.upstream），
+# 然后照常走 --fqbn ...:PartitionScheme=no_ota —— 尺寸检查、链接、分区 bin
+# 生成全都自动用我们的表。core 升级后要重跑 install-part。
+install_part() {
+  CORE_DIR="$(find "$HOME/.arduino15/packages/esp32/hardware/esp32" -maxdepth 1 -type d 2>/dev/null | sort | tail -1)"
+  [ -n "$CORE_DIR" ] && [ -d "$CORE_DIR/tools/partitions" ] \
+    || die "找不到 esp32 core 的 tools/partitions 目录"
+  [ -f "$CORE_DIR/tools/partitions/no_ota.csv.upstream" ] \
+    || cp -f "$CORE_DIR/tools/partitions/no_ota.csv" "$CORE_DIR/tools/partitions/no_ota.csv.upstream"
+  cp -f "$PART_CSV_OTA_SRC" "$CORE_DIR/tools/partitions/no_ota.csv"
+  c_green "✓ 分区表已顶替: $CORE_DIR/tools/partitions/no_ota.csv（原版备份 .upstream）"
+}
+
+gen_ota_part_bin() {
+  local CHIP="${1:-c3}"
+  BUILD_DIR="$SKETCH_DIR/build-$CHIP"
+  # arduino-cli 编译时会生成 <sketch>.ino.partitions.bin，直接用
+  PART_BIN_OTA="$BUILD_DIR/esp32c3_hid_agent.ino.partitions.bin"
+  [ -f "$PART_BIN_OTA" ] || die "编译产物里没有分区 bin: $PART_BIN_OTA"
+  c_green "✓ OTA 分区表: $PART_BIN_OTA"
+}
+
+build_ota() {
+  local CHIP="${1:-c3}"
+  case "$CHIP" in
+    c3) local FQBN_CHIP="esp32:esp32:esp32c3:PartitionScheme=no_ota" ; local ESPTOOL_CHIP="esp32c3" ;;
+    s3) local FQBN_CHIP="esp32:esp32:esp32s3:PartitionScheme=no_ota" ; local ESPTOOL_CHIP="esp32s3" ;;
+    *) die "chip 只支持 c3 或 s3" ;;
+  esac
+  BUILD_DIR="$SKETCH_DIR/build-$CHIP"
+  check_env
+  install_part
+  c_bold "== 编译（OTA 版，factory+ota_1 分区，chip=$CHIP）=="
+  mkdir -p "$BUILD_DIR"
+  LOG="$(mktemp)"
+  if ! arduino-cli compile --fqbn "$FQBN_CHIP" \
+        --output-dir "$BUILD_DIR" "$SKETCH_DIR" 2>&1 | tee "$LOG"; then
+    rm -f "$LOG"; die "编译失败"
+  fi
+  rm -f "$LOG"
+  APP="$BUILD_DIR/esp32c3_hid_agent.ino.bin"
+  [ -f "$APP" ] || die "产物不存在: $APP"
+  echo
+  c_green "✓ OTA 版编译成功 (chip=$CHIP)"
+  ls -lh "$APP" | awk '{print "  app :", $5, $9}'
+  # app 槽上限 0x1F0000 = 2031616 字节
+  SIZE=$(wc -c < "$APP")
+  if [ "$SIZE" -gt 2031616 ]; then
+    c_red "✗ 固件 $SIZE 字节超过 ota 槽上限 2031616 —— 减功能或换分区表"
+    exit 1
+  fi
+}
+
+flash_ota() {
+  local CHIP="${1:-c3}"
+  case "$CHIP" in
+    c3) local ESPTOOL_CHIP="esp32c3" ;;
+    s3) local ESPTOOL_CHIP="esp32s3" ;;
+    *) die "chip 只支持 c3 或 s3" ;;
+  esac
+  build_ota "$CHIP"
+  gen_ota_part_bin "$CHIP"
+  PORT="${PORT:-/dev/ttyUSB0}"
+  [ -e "$PORT" ] || { c_red "✗ 串口 $PORT 不存在。ls /dev/ttyUSB* /dev/ttyACM* 看看。"; exit 1; }
+  BOOTLOADER="$(find_idf_bootloader)"
+  [ -n "$BOOTLOADER" ] || die "找不到 ESP-IDF 的 bootloader.bin（装 ESP-IDF，或 find ~/.arduino15 -name 'bootloader*.bin' 从 core 里找一个的）"
+  c_green "✓ bootloader: $BOOTLOADER"
+  APP="$BUILD_DIR/esp32c3_hid_agent.ino.bin"
+  c_bold "== esptool 烧录（OTA 版：factory 启动 + ota_1 槽待用）=="
+  # otadata(0xe000) 故意不写 → 空白态 → bootloader 默认 factory 启动
+  esptool.py --chip "$ESPTOOL_CHIP" --port "$PORT" --baud 460800 \
+    write_flash --flash_mode dio --flash_size 4MB \
+    0x0     "$BOOTLOADER" \
+    0x8000  "$PART_BIN_OTA" \
+    0x10000 "$APP"
+  echo
+  c_green "✓ 烧录完成。这版固件自带 OTA —— 之后升级走服务端 ota 指令，不再需要数据线。"
+}
+
 find_idf_bootloader() {
   # IDF bootloader 在 C3 上验证可用；Arduino core 2.0.17 自带的那个会崩溃循环。
   for p in "$HOME/esp/esp-idf/components/bootloader/subproject/main/bootloader.bin" \
@@ -213,8 +302,10 @@ upload_flash() {
 
 case "$1" in
   build)        build ;;
+  build-ota)    build_ota "${2:-c3}" ;;
   upload)       upload_arduino ;;
   upload-flash) upload_flash ;;
+  flash-ota)    flash_ota "${2:-c3}" ;;
   size)         build ;;
   install-lib)  install_lib ;;
   -h|--help)    usage ;;

@@ -34,6 +34,11 @@ static const int   SERVER_PORT = 8765;
 // 粘贴时不要带引号、不要带空格、不要带尾部换行。
 static const char *SERVER_TOKEN = "PASTE_TOKEN_HERE";
 
+// ------------------------------------------------------------- OTA --------
+// 远程固件升级的下载地址白名单（编译期定死）。只接受以此前缀开头的 url，
+// 前缀所在机器上要跑 ota_httpd.py（默认端口 8766）。保持和 SERVER_HOST 同机。
+static const char *OTA_URL_PREFIX = "http://192.168.1.100:8766/";
+
 // ------------------------------------------------------------ 手机屏幕 -----
 // 绝对坐标 tap/swipe 用。查你的手机分辨率：
 //   adb shell wm size        → Physical size: 1220x2712

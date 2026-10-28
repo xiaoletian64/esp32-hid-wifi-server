@@ -1,5 +1,9 @@
 # esp32-hid-wifi-server
 
+> **增强版**：本仓库在上游基础上增加了 OTA 无线升级、ESP32-S3 支持、mobile-mcp 风格 MCP 适配层和 /phone 授权任务流。**先读 [ENHANCEMENTS.md](ENHANCEMENTS.md)**，下文为上游原文。
+
+
+
 **Give an AI agent hands on your Android phone — over WiFi, over Bluetooth, with no USB cable and no root.**
 
 一台 ESP32-C3（约 ¥15）插在手机旁边当"蓝牙键盘鼠标"，你的 AI agent 跑在服务器上，

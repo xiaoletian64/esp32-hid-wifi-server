@@ -1,0 +1,20 @@
+# 4MB flash 的 OTA 分区表（factory + 单 ota 槽）。
+#
+# 设计取舍：不用 ota_0/ota_1 双 OTA 槽，保留 factory —— 首次线烧的启动路径
+# 和上游实测过的 no_ota/factory 配方完全一致（IDF bootloader 认 factory），
+# 首启风险为零；OTA 升级写到 app1(ota_1)，otadata 切换，factory 永远是
+# "退路镜像"（重刷 0x10000 即回滚，不用救砖）。
+#
+# 每个 app 槽 0x1F0000 = 2031616 字节 ≈ 1.94MB，装得下 ~1.54MB 的固件
+# （上游 no_ota 方案 2MB 槽装 73%，本表每槽略小但富余仍 >25%）。
+# ⚠ 需要 4MB flash 的板子（买 C3 Super Mini 认准 4MB）。
+#
+# 首烧（scripts/build_firmware.sh flash-ota）：
+#   bootloader@0x0 + 本表@0x8000 + app@0x10000，otadata(0xe000) 保持空白
+#   → bootloader 默认从 factory 启动。
+# 之后：HTTPUpdate 写 app1 + otadata → 重启进新固件。
+nvs,        data, nvs,      0x9000,  0x5000,
+otadata,    data, ota,      0xe000,  0x2000,
+factory,    app,  factory,  0x10000, 0x1F0000,
+app1,       app,  ota_1,    0x200000,0x1F0000,
+coredump,   data, coredump, 0x3F0000,0x10000,

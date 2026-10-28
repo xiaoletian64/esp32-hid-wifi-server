@@ -35,6 +35,7 @@
 
 #include <WiFi.h>
 #include <WebSocketsClient.h>
+#include <HTTPUpdate.h>
 #include <BleCombo.h>
 
 #include "config.h"   // ← 你的配置（WiFi / 服务器 / 屏幕 / 配对码）
@@ -302,6 +303,34 @@ static void doScroll(const char *id, long dy) {
   reply(id, "done", true);
 }
 
+/*
+ * OTA：服务端下发 {"op":"ota","url":"...","md5":"..."}。
+ *
+ * 安全（与 server 端对齐的双层白名单）：
+ *   - url 必须以 config.h 的 OTA_URL_PREFIX 开头（编译期定死，默认指向
+ *     跑 ota_httpd.py 的那台），防止服务端被攻破后把板子刷成别的包。
+ *   - md5 必须 32 位 hex；传输完整性由 OTA 服务器响应头 x-MD5 兜底
+ *     （HTTPUpdate 自动比对下载内容与该头）。
+ *
+ * 流程：先回 ACK（升级中 WebSocket 会断），HTTPUpdate 写 ota_1 分区 +
+ * otadata 切换，成功自动重启进新固件；3 秒后 WS 自动重连，/status 里的
+ * fw 版本号可用于核验升级是否真的生效。
+ * 物理急停同样管 OTA：killed 状态下这里根本进不来（handleCommand 已拦）。
+ */
+static void doOta(const char *id, const char *url, const char *md5) {
+  if (strncmp(url, OTA_URL_PREFIX, strlen(OTA_URL_PREFIX)) != 0) {
+    reply(id, "done", false, "url not allowed"); return;
+  }
+  if (strlen(md5) != 32) { reply(id, "done", false, "bad md5"); return; }
+  reply(id, "done", true);
+  Serial.printf("[ota] start %s (md5 %.8s...)\n", url, md5);
+  WiFiClient client;
+  HTTPUpdate httpUp;                       // rebootOnUpdate 默认 true
+  HTTPUpdateResult r = httpUp.update(client, url);
+  /* 能执行到这里说明失败了 —— 成功会在写完后直接重启。 */
+  Serial.printf("[ota] failed(%d): %s\n", r, httpUp.getLastErrorString().c_str());
+}
+
 static void handleCommand(const char *json) {
   char id[24] = "0", op[24] = "";
   jsonString(json, "id", id, sizeof(id));
@@ -352,6 +381,12 @@ static void handleCommand(const char *json) {
     if (!jsonInt(json, "dy", &dy)) { reply(id, "done", false, "bad scroll"); return; }
     doScroll(id, dy); return;
   }
+  if (strcmp(op, "ota") == 0) {
+    char url[200] = {0}, md5[40] = {0};
+    if (!jsonString(json, "url", url, sizeof(url))) { reply(id, "done", false, "no url"); return; }
+    if (!jsonString(json, "md5", md5, sizeof(md5))) { reply(id, "done", false, "no md5"); return; }
+    doOta(id, url, md5); return;
+  }
   reply(id, "done", false, "unknown op");
 }
 
@@ -364,7 +399,7 @@ static void onEvent(WStype_t type, uint8_t *payload, size_t length) {
     case WStype_CONNECTED: {
       // 用 strlen 而不是手数长度：早期版本给 39 字符的串发了 40 字节，
       // 尾部那个 NUL 让服务端 json.loads 失败，board_hello 永远进不了审计日志。
-      static const char *hello = "{\"ev\":\"hello\",\"fw\":\"c3-1.0\",\"ble\":true}";
+      static const char *hello = "{\"ev\":\"hello\",\"fw\":\"c3-1.1\",\"ble\":true}";
       ws.sendTXT((uint8_t *)hello, strlen(hello));
       Serial.println("[ws] connected");
       break;
