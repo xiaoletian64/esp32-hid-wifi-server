@@ -36,6 +36,9 @@
 #include <WiFi.h>
 #include <WebSocketsClient.h>
 #include <HTTPUpdate.h>
+#include <Preferences.h>
+#include <WebServer.h>
+#include <Update.h>
 #include <BleCombo.h>
 
 #include "config.h"   // ← 你的配置（WiFi / 服务器 / 屏幕 / 配对码）
@@ -45,6 +48,18 @@
 static const uint16_t MAX_TEXT_CHARS     = 200;
 static const uint32_t CONNECT_TIMEOUT_MS = 15000;
 static const uint32_t RECONNECT_DELAY_MS = 3000;
+static const uint32_t SETUP_AP_AFTER_MS  = 90000;  // 出厂+NVS 都连不上 90 秒后开配网热点
+
+// ------------------------------------------------------------ 网络状态 ----
+// NVS 里存的用户 WiFi（wifi op 下发 / 配网网页写入），优先于 config.h 出厂值。
+static Preferences prefs;
+static char     savedSsid[33] = "";
+static char     savedPass[65] = "";
+static uint32_t noWifiSinceMs = 0;
+static bool     setupApUp = false;
+static WebServer setupWeb(80);
+
+static void setupApStart();   // 前置声明
 
 // ---------------------------------------------------------- 键名映射表 ----
 
@@ -318,9 +333,13 @@ static void doScroll(const char *id, long dy) {
  * 物理急停同样管 OTA：killed 状态下这里根本进不来（handleCommand 已拦）。
  */
 static void doOta(const char *id, const char *url, const char *md5) {
-  if (strncmp(url, OTA_URL_PREFIX, strlen(OTA_URL_PREFIX)) != 0) {
-    reply(id, "done", false, "url not allowed"); return;
+  // 多源白名单：云端 / 家里 LAN / 任意可信分发点，编译期定死
+  static const char *const prefixes[] = OTA_URL_PREFIX_LIST;
+  bool allowed = false;
+  for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
+    if (strncmp(url, prefixes[i], strlen(prefixes[i])) == 0) { allowed = true; break; }
   }
+  if (!allowed) { reply(id, "done", false, "url not allowed"); return; }
   if (strlen(md5) != 32) { reply(id, "done", false, "bad md5"); return; }
   reply(id, "done", true);
   Serial.printf("[ota] start %s (md5 %.8s...)\n", url, md5);
@@ -387,6 +406,30 @@ static void handleCommand(const char *json) {
     if (!jsonString(json, "md5", md5, sizeof(md5))) { reply(id, "done", false, "no md5"); return; }
     doOta(id, url, md5); return;
   }
+  if (strcmp(op, "wifi") == 0) {
+    // 运行时切网：手机热点（走流量 OTA）、换路由都靠这个。存 NVS，重启仍生效。
+    char ssid[33] = {0}, pass[65] = {0};
+    if (!jsonString(json, "ssid", ssid, sizeof(ssid))) { reply(id, "done", false, "no ssid"); return; }
+    jsonString(json, "pass", pass, sizeof(pass));
+    prefs.begin("hid", false);
+    prefs.putString("ssid", ssid); prefs.putString("pass", pass);
+    prefs.end();
+    strlcpy(savedSsid, ssid, sizeof(savedSsid));
+    strlcpy(savedPass, pass, sizeof(savedPass));
+    reply(id, "done", true);   // 切网会断 WS，先 ACK
+    Serial.printf("[wifi] 切换到 \"%s\" …\n", ssid);
+    WiFi.disconnect();
+    delay(300);
+    if (tryConnect(savedSsid, savedPass, 20000)) {
+      if (setupApUp) { setupApUp = false; setupWeb.stop(); WiFi.softAPdisconnect(true); }
+      WiFi.mode(WIFI_STA);
+      Serial.printf("[wifi] 已切换: %s\n", WiFi.localIP().toString().c_str());
+    } else {
+      noWifiSinceMs = millis();  // 失败则进无网自救流程（配网热点）
+      Serial.println("[wifi] 切换失败，稍后重试/开配网热点");
+    }
+    return;
+  }
   reply(id, "done", false, "unknown op");
 }
 
@@ -431,23 +474,99 @@ static void setupHid() {
   Serial.printf("[ble] %s up, screen %ux%u\n", BLE_DEVICE_NAME, SCREEN_W, SCREEN_H);
 }
 
-static void connectWifi() {
+static bool tryConnect(const char *ssid, const char *pass, uint32_t ms) {
+  if (!ssid[0]) return false;
   WiFi.mode(WIFI_STA);
   WiFi.setHostname("esp32-hid");
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  Serial.print("[wifi] connecting");
+  WiFi.begin(ssid, pass);
+  Serial.printf("[wifi] try \"%s\"", ssid);
   uint32_t t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < CONNECT_TIMEOUT_MS) {
-    delay(250); Serial.print(".");
-  }
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < ms) { delay(250); Serial.print("."); }
+  Serial.println();
+  return WiFi.status() == WL_CONNECTED;
+}
 
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("\n[wifi] FAILED - check SSID spelling/case and 2.4GHz band");
-    Serial.println("[hint] the real SSID list is in your router's admin page");
+static void loadSavedWifi() {
+  prefs.begin("hid", true);
+  strlcpy(savedSsid, prefs.getString("ssid", "").c_str(), sizeof(savedSsid));
+  strlcpy(savedPass, prefs.getString("pass", "").c_str(), sizeof(savedPass));
+  prefs.end();
+  if (savedSsid[0]) Serial.printf("[wifi] NVS 已存网络: \"%s\"\n", savedSsid);
+}
+
+static void connectWifi() {
+  // 优先级：NVS（wifi op / 配网页写过的）> config.h 出厂值
+  if (tryConnect(savedSsid, savedPass, CONNECT_TIMEOUT_MS)) {
+    Serial.printf("[wifi] up: %s (nvs)\n", WiFi.localIP().toString().c_str());
     return;
   }
-  Serial.printf("\n[wifi] up: %s\n", WiFi.localIP().toString().c_str());
+  if (tryConnect(WIFI_SSID, WIFI_PASSWORD, CONNECT_TIMEOUT_MS)) {
+    Serial.printf("[wifi] up: %s (factory)\n", WiFi.localIP().toString().c_str());
+    return;
+  }
+  Serial.println("[wifi] FAILED - check SSID spelling/case and 2.4GHz band");
+  noWifiSinceMs = millis();   // loop 里会定期重试，超时开配网热点
+}
+
+// --------------------------------------------- SoftAP 配网 + 网页升级 ----
+// 板子在没有任何已知 WiFi 的环境也能活：手机连它的热点 "ESP32-HID-Setup"，
+// 浏览器开 http://192.168.4.1/ —— 填 WiFi、上传固件都行（这就是"无网升级"通道，
+// 比 BLE 传固件快一个数量级且不占用 HID 的 GATT）。
+
+static const char *SETUP_INDEX_HTML =
+  "<meta name=viewport content='width=device-width,initial-scale=1'>"
+  "<h3>ESP32 HID 配网</h3>"
+  "<form method=POST action=/save>"
+  "WiFi名: <input name=ssid><br>密码: <input name=pass><br>"
+  "<button>保存并连接</button></form><hr>"
+  "<h3>固件升级（无网）</h3>"
+  "<form method=POST action=/update enctype='multipart/form-data'>"
+  "<input type=file name=bin accept='.bin'><button>上传并升级</button></form>";
+
+static void handleFwUpload() {
+  HTTPUpload &up = setupWeb.upload();
+  if (up.status == UPLOAD_FILE_START) {
+    Serial.printf("[setup] 上传固件: %s\n", up.filename.c_str());
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
+  } else if (up.status == UPLOAD_FILE_WRITE) {
+    if (Update.write(up.buf, up.currentSize) != up.currentSize) Update.printError(Serial);
+  } else if (up.status == UPLOAD_FILE_END) {
+    if (Update.end(true)) {
+      Serial.printf("[setup] 固件完成 %u 字节，重启\n", up.totalSize);
+      setupWeb.send(200, "text/plain", "升级成功，重启中。请把手机 WiFi 切回原来的网络。");
+      delay(800);
+      ESP.restart();
+    } else {
+      Update.printError(Serial);
+      setupWeb.send(500, "text/plain", "升级失败（固件不完整或不匹配）");
+    }
+  }
+}
+
+static void setupApStart() {
+  if (setupApUp) return;
+  setupApUp = true;
+  WiFi.mode(WIFI_AP_STA);                       // STA 保留：后台继续试家里网
+  WiFi.softAP("ESP32-HID-Setup");               // 开放热点；配网完成即关
+  Serial.print("[setup] 配网热点开启，访问 http://");
+  Serial.println(WiFi.softAPIP());
+  setupWeb.on("/", HTTP_GET, [] { setupWeb.send(200, "text/html", SETUP_INDEX_HTML); });
+  setupWeb.on("/save", HTTP_POST, [] {
+    String s = setupWeb.arg("ssid"), p = setupWeb.arg("pass");
+    if (!s.length()) { setupWeb.send(400, "text/plain", "ssid 为空"); return; }
+    prefs.begin("hid", false);
+    prefs.putString("ssid", s); prefs.putString("pass", p);
+    prefs.end();
+    setupWeb.send(200, "text/plain", "已保存，正在连接 " + s + " …");
+    strlcpy(savedSsid, s.c_str(), sizeof(savedSsid));
+    strlcpy(savedPass, p.c_str(), sizeof(savedPass));
+    tryConnect(savedSsid, savedPass, 20000);
+    if (WiFi.status() == WL_CONNECTED) { setupApUp = false; setupWeb.stop(); WiFi.softAPdisconnect(true); WiFi.mode(WIFI_STA); }
+  });
+  setupWeb.on("/update", HTTP_POST, [] {
+    if (!Update.hasError()) setupWeb.send(200, "text/plain", "处理中");
+  }, handleFwUpload);
+  setupWeb.begin();
 }
 
 // --------------------------------------------------------------- setup ----
@@ -457,6 +576,8 @@ void setup() {
   Serial.begin(115200);
   delay(400);
   Serial.println("\n[boot] esp32-c3-hid-agent");
+
+  loadSavedWifi();
 
   // HID 先起：已配对的手机几秒内自己就重连了，
   // 下面等 WiFi 最多 15 秒会拖慢它。
@@ -476,6 +597,21 @@ void setup() {
 
 void loop() {
   ws.loop();
+
+  // 无网自救：周期重试已知网络；一直连不上就开配网热点（网页可配网 + 无网传固件）
+  if (WiFi.status() != WL_CONNECTED && WiFi.getMode() & WIFI_STA) {
+    if (!noWifiSinceMs) noWifiSinceMs = millis();
+    if (!setupApUp && millis() - noWifiSinceMs > SETUP_AP_AFTER_MS) setupApStart();
+    static uint32_t lastRetry = 0;
+    if (millis() - lastRetry > 60000) {
+      lastRetry = millis();
+      if (tryConnect(savedSsid, savedPass, 8000) || tryConnect(WIFI_SSID, WIFI_PASSWORD, 8000)) {
+        noWifiSinceMs = 0;
+        if (setupApUp) { setupApUp = false; setupWeb.stop(); WiFi.softAPdisconnect(true); WiFi.mode(WIFI_STA); }
+      }
+    }
+  }
+  if (setupApUp) setupWeb.handleClient();
 
   // 物理急停：按住 BOOT，所有 HID 输出立刻停止，直到重启。
   if (!killed && killAsserted()) {

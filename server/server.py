@@ -181,15 +181,16 @@ def validate_command(cmd, ota_prefix=""):
 
     if op == "ota":
         # 远程固件升级。两层白名单：
-        #   服务端：url 必须以 --ota-prefix 开头（默认 http://<bind>:8766/）
-        #   固件侧：url 必须以 config.h 的 OTA_URL_PREFIX 开头，二次校验
+        #   服务端：url 必须以 --ota-prefix（可逗号分隔多个源）之一开头
+        #   固件侧：url 必须匹配 config.h 的 OTA_URL_PREFIX_LIST 之一，二次校验
         # md5 是 32 位 hex，固件/agent 用来核对升级产物。
         url = cmd.get("url")
         md5 = cmd.get("md5")
         if not ota_prefix:
             raise PolicyError("ota disabled on this server (no --ota-prefix)")
-        if not isinstance(url, str) or not url.startswith(ota_prefix) or len(url) > 200:
-            raise PolicyError(f"ota 'url' must start with {ota_prefix!r} and be <=200 chars")
+        allowed = [p.strip() for p in ota_prefix.split(",") if p.strip()]
+        if not isinstance(url, str) or len(url) > 200 or not any(url.startswith(p) for p in allowed):
+            raise PolicyError(f"ota 'url' must start with one of {allowed} and be <=200 chars")
         if not isinstance(md5, str) or not re.fullmatch(r"[0-9a-f]{32}", md5):
             raise PolicyError("'md5' must be 32 lowercase hex chars")
         return op, {"url": url, "md5": md5}
@@ -570,7 +571,7 @@ def main():
     ap.add_argument("--listen-lan", action="store_true",
                     help="allow POST /cmd from --bind's address (default: loopback only)")
     ap.add_argument("--ota-prefix", default=None,
-                    help="allowed URL prefix for the 'ota' op "
+                    help="allowed URL prefix(es) for the 'ota' op, comma-separated for multiple sources "
                          "(default: http://<bind>:8766/). Empty string disables OTA.")
     args = ap.parse_args()
 

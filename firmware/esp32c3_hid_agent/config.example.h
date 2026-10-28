@@ -35,9 +35,10 @@ static const int   SERVER_PORT = 8765;
 static const char *SERVER_TOKEN = "PASTE_TOKEN_HERE";
 
 // ------------------------------------------------------------- OTA --------
-// 远程固件升级的下载地址白名单（编译期定死）。只接受以此前缀开头的 url，
-// 前缀所在机器上要跑 ota_httpd.py（默认端口 8766）。保持和 SERVER_HOST 同机。
-static const char *OTA_URL_PREFIX = "http://192.168.1.100:8766/";
+// 远程固件升级的下载地址白名单（编译期定死）。可配多个源：云端分发 + 家里
+// LAN 分发（ota_httpd.py 可挂任何一台内网机器）。板子连哪个网，agent 就下发
+// 哪个源的 url。保持和 SERVER_HOST 同机最简单。
+#define OTA_URL_PREFIX_LIST { "http://192.168.1.100:8766/", "http://192.168.4.1:8766/" }
 
 // ------------------------------------------------------------ 手机屏幕 -----
 // 绝对坐标 tap/swipe 用。查你的手机分辨率：
