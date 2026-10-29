@@ -61,7 +61,7 @@ final class Bridge: ObservableObject {
 
     static let timeout: TimeInterval = 10
 
-    private var guardHeader: String {
+    var guardHeader: String {
         let d = Data(token.utf8)
         return SHA256.hash(data: d).map { String(format: "%02x", $0) }.joined()
     }
