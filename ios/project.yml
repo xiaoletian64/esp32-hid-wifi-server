@@ -8,3 +8,12 @@ targets:
     type: application
     platform: iOS
     sources: [PhoneBridge]
+    info:
+      path: PhoneBridge/Info.plist
+      properties:
+        CFBundleDisplayName: PhoneBridge
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        NSLocalNetworkUsageDescription: "PhoneBridge 需要访问局域网以连接你的 ESP32 手机控制中转站。"
+        NSBonjourServices: ["_esp32hid._tcp"]
