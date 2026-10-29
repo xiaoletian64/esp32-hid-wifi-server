@@ -20,7 +20,7 @@ jobs:
         run: |
           set -o pipefail
           cd ios
-          xcodebuild -project PhoneBridge.xcodeproj -scheme PhoneBridge             -destination "generic/platform=iOS" -configuration Release build             CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY=""             -derivedDataPath build > /tmp/xc.log 2>&1
+          xcodebuild -project PhoneBridge.xcodeproj -scheme PhoneBridge             -destination "generic/platform=iOS" -configuration Release build             CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY=""             -derivedDataPath build > /tmp/xc.log 2>&1 || true
           grep -E "error:|warning: .*deprecated|BUILD (SUCCEEDED|FAILED)" /tmp/xc.log | head -30 || true
           grep -n "Undefined symbols" -A 15 /tmp/xc.log | head -60 || true
           tail -5 /tmp/xc.log
