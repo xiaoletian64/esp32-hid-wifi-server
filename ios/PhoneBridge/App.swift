@@ -22,11 +22,22 @@ struct FacadeScreen: Decodable {
     var h: Int?
 }
 
-struct UIElement: Decodable, Identifiable {
+struct UIElement: Identifiable {
     var text: String?
     var bounds: [Double]?
     var clickable: Bool?
     var id: Int = 0
+}
+
+extension UIElement: Decodable {
+    private enum CodingKeys: String, CodingKey { case text, bounds, clickable }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        text = try c.decodeIfPresent(String.self, forKey: .text)
+        bounds = try c.decodeIfPresent([Double].self, forKey: .bounds)
+        clickable = try c.decodeIfPresent(Bool.self, forKey: .clickable)
+        id = 0
+    }
 }
 
 struct LogEntry: Identifiable {
@@ -62,15 +73,18 @@ final class Bridge: ObservableObject {
     }
 
     func log(_ s: String) {
-        DispatchQueue.main.async { self.logs.insert(LogEntry(time: Date(), text: s), id: 0) }
-        if logs.count > 60 { logs.removeLast(logs.count - 60) }
+        let entry = LogEntry(time: Date(), text: s)
+        DispatchQueue.main.async {
+            self.logs.insert(entry, at: 0)
+            if self.logs.count > 60 { self.logs.removeLast(self.logs.count - 60) }
+        }
     }
 
     // Generic request; returns raw Data (2xx enforced).
     func request(_ method: String, _ path: String, body: [String: Any]? = nil) async throws -> Data {
         var req = URLRequest(url: URL(string: cleanBase() + path)!, timeoutInterval: Self.timeout)
         req.httpMethod = method
-        req.setValue(guardValue, forHTTPHeaderField: "X-HID-Guard")
+        req.setValue(guardHeader, forHTTPHeaderField: "X-HID-Guard")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let body = body {
             req.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -105,7 +119,7 @@ final class Bridge: ObservableObject {
         hidOnline = false
         connected = false
         do {
-            let hs: HidStatus = try await request("GET", "/hid/status")
+            let hs = try JSONDecoder().decode(HidStatus.self, from: try await request("GET", "/hid/status"))
             hidOnline = hs.board != nil
             fw = hs.board?.fw ?? "-"
         } catch { fw = "-"; log("hid/status: \(error.localizedDescription)") }
@@ -370,7 +384,7 @@ struct ScreenTab: View {
         defer { loading = false }
         do {
             var req = URLRequest(url: URL(string: bridge.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/ ")) + "/x/screenshot")!, timeoutInterval: 10)
-            req.setValue(bridge.guardValue, forHTTPHeaderField: "X-HID-Guard")
+            req.setValue(bridge.guardHeader, forHTTPHeaderField: "X-HID-Guard")
             let (data, _) = try await URLSession.shared.data(for: req)
             if let img = UIImage(data: data) { shot = img } else { bridge.log("screenshot: 数据不是 PNG") }
         } catch {
@@ -379,13 +393,17 @@ struct ScreenTab: View {
     }
 
     private func loadApps() async {
-        do { apps = try await bridge.request("GET", "/x/apps") as [String] }
+        do {
+            let data = try await bridge.request("GET", "/x/apps")
+            apps = (try? JSONDecoder().decode([String].self, from: data)) ?? []
+        }
         catch { bridge.log("apps: \(error.localizedDescription)") }
     }
 
     private func loadUI() async {
         do {
-            let list = try await bridge.request("GET", "/x/ui") as [UIElement]
+            let data = try await bridge.request("GET", "/x/ui")
+            let list = (try? JSONDecoder().decode([UIElement].self, from: data)) ?? []
             var out: [UIElement] = []
             for (i, e) in list.enumerated() {
                 var m = e
