@@ -141,7 +141,8 @@ final class Bridge: ObservableObject {
     }
 
     func facadeKey(_ key: String) async -> Bool {
-        await send("/x/hid", ["op": "key", "key": key])
+        // 门面 /x/hid：op 直接是 back/home/menu/power/enter（映射 adb keyevent）
+        await send("/x/hid", ["op": key.lowercased()])
     }
 }
 
@@ -167,6 +168,8 @@ struct RootView: View {
                     .tabItem { Label("输入", systemImage: "keyboard") }
                 TapTab(bridge: bridge)
                     .tabItem { Label("点按", systemImage: "hand.tap") }
+                SystemTab(bridge: bridge)
+                    .tabItem { Label("系统", systemImage: "gearshape") }
             }
             LogSection(bridge: bridge)
         }
@@ -286,6 +289,13 @@ struct ScreenTab: View {
                 pill("元素") { Task { await loadUI(); showUI = true } }
                 pill("HOME") { Task { _ = await bridge.facadeKey("HOME") } }
                 pill("BACK") { Task { _ = await bridge.facadeKey("BACK") } }
+            }
+            .padding(.horizontal)
+            .padding(.bottom, 4)
+            HStack(spacing: 10) {
+                pill("MENU") { Task { _ = await bridge.facadeKey("MENU") } }
+                pill("POWER") { Task { _ = await bridge.facadeKey("POWER") } }
+                pill("回车键") { Task { _ = await bridge.facadeKey("ENTER") } }
             }
             .padding(.horizontal)
             .padding(.bottom, 4)
@@ -420,17 +430,28 @@ struct ScreenTab: View {
 struct InputTab: View {
     @ObservedObject var bridge: Bridge
     @State var text = ""
-    @State var mod1 = "none"
+    @State var mod1 = "CTRL"
     @State var mod2 = "none"
-    @State var keyName = "a"
+    @State var keyName = "A"
 
-    let mods = ["none", "ctrl", "alt", "shift", "gui"]
-    let keys = ["a", "b", "c", "tab", "esc", "space", "enter", "up", "down", "left", "right", "f1", "f2", "f3", "f4", "f5"]
+    // 服务端只允许 CTRL/ALT/SHIFT 修饰键
+    let mods = ["none", "CTRL", "ALT", "SHIFT"]
+    // ALLOWED_KEYS 全集（大写，服务端大小写敏感）
+    let keys = ["A", "B", "C", "D", "E", "F", "G", "X", "V", "Z",
+                "ENTER", "BACK", "BACKSPACE", "TAB", "ESC", "SPACE", "DEL",
+                "UP", "DOWN", "LEFT", "RIGHT", "HOME", "PAGE_UP", "PAGE_DOWN",
+                "VOLUME_UP", "VOLUME_DOWN", "MUTE"]
+    let keyRows: [[String]] = [
+        ["UP"], ["LEFT", "DOWN", "RIGHT"],
+        ["ENTER", "BACK", "BACKSPACE", "SPACE"],
+        ["ESC", "TAB", "DEL", "HOME"],
+        ["PAGE_UP", "PAGE_DOWN"]
+    ]
 
     var body: some View {
         ScrollView {
             VStack(spacing: 12) {
-                TextField("要输入的文本", text: $text)
+                TextField("要输入的文本（ASCII）", text: $text)
                     .textFieldStyle(.roundedBorder)
                     .autocapitalization(.none)
                     .disableAutocorrection(true)
@@ -439,28 +460,38 @@ struct InputTab: View {
                         let t = text
                         Task { _ = await bridge.hid("type", extra: ["text": t]) }
                     }
-                    pill("回车") { Task { _ = await bridge.hid("key", extra: ["key": "enter"]) } }
+                    pill("回车") { Task { _ = await bridge.hid("key", extra: ["key": "ENTER"]) } }
                 }
                 Divider().background(Color.gray.opacity(0.4))
+                Text("HID 按键").font(.caption).foregroundColor(.gray)
+                ForEach(keyRows.indices, id: \.self) { r in
+                    HStack(spacing: 8) {
+                        ForEach(keyRows[r], id: \.self) { k in
+                            pill(k) { Task { _ = await bridge.hid("key", extra: ["key": k]) } }
+                        }
+                    }
+                }
+                Divider().background(Color.gray.opacity(0.4))
+                Text("Combo（修饰键必选一个）").font(.caption).foregroundColor(.gray)
                 HStack {
                     Picker("", selection: $mod1) { ForEach(mods, id: \.self) { Text($0) } }
                     Picker("", selection: $keyName) { ForEach(keys, id: \.self) { Text($0) } }
                     Picker("", selection: $mod2) { ForEach(mods, id: \.self) { Text($0) } }
                 }
                 .pickerStyle(.menu)
-                pill("Combo") {
+                pill("发送 Combo") {
                     var parts: [String] = []
                     if mod1 != "none" { parts.append(mod1) }
                     if mod2 != "none" { parts.append(mod2) }
                     parts.append(keyName)
-                    let combo = parts.joined(separator: "+")
-                    Task { _ = await bridge.hid("combo", extra: ["keys": combo]) }
+                    // 协议要求 keys 是数组，如 ["CTRL","A"]
+                    Task { _ = await bridge.hid("combo", extra: ["keys": parts]) }
                 }
                 Divider().background(Color.gray.opacity(0.4))
                 HStack(spacing: 10) {
-                    pill("音量+") { Task { _ = await bridge.hid("key", extra: ["key": "volume_up"]) } }
-                    pill("音量−") { Task { _ = await bridge.hid("key", extra: ["key": "volume_down"]) } }
-                    pill("静音") { Task { _ = await bridge.hid("key", extra: ["key": "mute"]) } }
+                    pill("音量+") { Task { _ = await bridge.hid("key", extra: ["key": "VOLUME_UP"]) } }
+                    pill("音量−") { Task { _ = await bridge.hid("key", extra: ["key": "VOLUME_DOWN"]) } }
+                    pill("静音") { Task { _ = await bridge.hid("key", extra: ["key": "MUTE"]) } }
                 }
                 Divider().background(Color.gray.opacity(0.4))
                 HStack(spacing: 16) {
@@ -491,6 +522,67 @@ struct InputTab: View {
                 .padding(.vertical, 8)
                 .background(Color.white)
                 .cornerRadius(16)
+        }
+    }
+}
+
+// MARK: - System tab (OTA / WiFi / device info)
+
+struct SystemTab: View {
+    @ObservedObject var bridge: Bridge
+    @State var otaURL = ""
+    @State var otaMD5 = ""
+    @State var wifiSSID = ""
+    @State var wifiPass = ""
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("板子状态").font(.caption).foregroundColor(.gray)
+                Text(bridge.hidOnline ? "在线 · 固件 \(bridge.fw)" : "离线")
+                    .foregroundColor(bridge.hidOnline ? .green : .red)
+                Text("被控端 \(bridge.screenW > 0 ? "\(bridge.screenW)x\(bridge.screenH)" : "未知")")
+                    .font(.caption).foregroundColor(.gray)
+                Divider().background(Color.gray.opacity(0.4))
+                Text("固件 OTA 升级").font(.caption).foregroundColor(.gray)
+                TextField("固件 URL（http://106.52.123.149:8766/... 或 192.168.6.1）", text: $otaURL)
+                    .textFieldStyle(.roundedBorder)
+                    .autocapitalization(.none)
+                    .disableAutocorrection(true)
+                    .font(.system(size: 12, design: .monospaced))
+                TextField("固件 md5（32 位 hex，服务端有公布）", text: $otaMD5)
+                    .textFieldStyle(.roundedBorder)
+                    .autocapitalization(.none)
+                    .disableAutocorrection(true)
+                    .font(.system(size: 12, design: .monospaced))
+                Button {
+                    let u = otaURL, m = otaMD5
+                    Task { _ = await bridge.hid("ota", extra: ["url": u, "md5": m.lowercased()]) }
+                } label: {
+                    Text("发送 OTA").frame(maxWidth: .infinity).padding(10)
+                        .background(Color.white).foregroundColor(.black).cornerRadius(12)
+                }
+                .disabled(otaURL.isEmpty || otaMD5.count != 32)
+                Text("发送后板子会自行下载并重启升级，请保持供电。")
+                    .font(.caption2).foregroundColor(.gray)
+                Divider().background(Color.gray.opacity(0.4))
+                Text("WiFi 切网（存入板子 NVS，最高优先级）").font(.caption).foregroundColor(.gray)
+                TextField("SSID", text: $wifiSSID)
+                    .textFieldStyle(.roundedBorder).autocapitalization(.none).disableAutocorrection(true)
+                SecureField("密码", text: $wifiPass)
+                    .textFieldStyle(.roundedBorder).autocapitalization(.none).disableAutocorrection(true)
+                Button {
+                    let s = wifiSSID, p = wifiPass
+                    Task { _ = await bridge.hid("wifi", extra: ["ssid": s, "pass": p]) }
+                } label: {
+                    Text("写入板子").frame(maxWidth: .infinity).padding(10)
+                        .background(Color.white).foregroundColor(.black).cornerRadius(12)
+                }
+                .disabled(wifiSSID.isEmpty || wifiPass.count < 8)
+                Text("优先级：NVS 存储的 WiFi > 出厂 WiFi > 兜底列表。")
+                    .font(.caption2).foregroundColor(.gray)
+            }
+            .padding()
         }
     }
 }
