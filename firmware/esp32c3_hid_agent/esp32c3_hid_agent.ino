@@ -494,16 +494,20 @@ static void loadSavedWifi() {
   if (savedSsid[0]) Serial.printf("[wifi] NVS 已存网络: \"%s\"\n", savedSsid);
 }
 
+// 候选列表：NVS（wifi op/配网页写的）> 出厂主 WiFi > 出厂备选列表
+struct WifiCand { const char *ssid; const char *pass; };
+static bool connectAll(uint32_t perTryMs) {
+  if (tryConnect(savedSsid, savedPass, perTryMs)) { Serial.printf("[wifi] up: %s (nvs)\n", WiFi.localIP().toString().c_str()); return true; }
+  if (tryConnect(WIFI_SSID, WIFI_PASSWORD, perTryMs)) { Serial.printf("[wifi] up: %s\n", WiFi.localIP().toString().c_str()); return true; }
+  static const WifiCand fallback[] = WIFI_FALLBACK_LIST;
+  for (auto &c : fallback) {
+    if (tryConnect(c.ssid, c.pass, perTryMs)) { Serial.printf("[wifi] up: %s (fallback)\n", WiFi.localIP().toString().c_str()); return true; }
+  }
+  return false;
+}
+
 static void connectWifi() {
-  // 优先级：NVS（wifi op / 配网页写过的）> config.h 出厂值
-  if (tryConnect(savedSsid, savedPass, CONNECT_TIMEOUT_MS)) {
-    Serial.printf("[wifi] up: %s (nvs)\n", WiFi.localIP().toString().c_str());
-    return;
-  }
-  if (tryConnect(WIFI_SSID, WIFI_PASSWORD, CONNECT_TIMEOUT_MS)) {
-    Serial.printf("[wifi] up: %s (factory)\n", WiFi.localIP().toString().c_str());
-    return;
-  }
+  if (connectAll(CONNECT_TIMEOUT_MS)) return;
   Serial.println("[wifi] FAILED - check SSID spelling/case and 2.4GHz band");
   noWifiSinceMs = millis();   // loop 里会定期重试，超时开配网热点
 }
@@ -605,7 +609,7 @@ void loop() {
     static uint32_t lastRetry = 0;
     if (millis() - lastRetry > 60000) {
       lastRetry = millis();
-      if (tryConnect(savedSsid, savedPass, 8000) || tryConnect(WIFI_SSID, WIFI_PASSWORD, 8000)) {
+      if (connectAll(8000)) {
         noWifiSinceMs = 0;
         if (setupApUp) { setupApUp = false; setupWeb.stop(); WiFi.softAPdisconnect(true); WiFi.mode(WIFI_STA); }
       }

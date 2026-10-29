@@ -10,13 +10,13 @@
 #define CONFIG_H
 
 // ---------------------------------------------------------------- WiFi -----
-// ESP32-C3 只支持 2.4GHz（802.11b/g/n），不支持 5GHz。
-//
-// SSID 大小写敏感：802.11 SSID 是字节串，空口实播什么就得填什么。填错时
-// 服务端会看到 disconnect reason 201 (NO_AP_FOUND)。若你不确定，用串口命令
-// `wifi scan` 扫一遍看实际拼写（见 README「排查」一节）。
+// ESP32-C3/S3 只支持 2.4GHz（802.11b/g/n），不支持 5GHz。
+// 多 WiFi 候选：按顺序逐个尝试，先连上为准（家里换路由/带出门都友好）。
+// SSID 大小写敏感；填错时服务端会看到 disconnect reason 201 (NO_AP_FOUND)。
 static const char *WIFI_SSID     = "YOUR_WIFI_SSID";
 static const char *WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+// 可选：额外候选（会与上面的主 WiFi 一起轮询）。没有就留空 {}。
+#define WIFI_FALLBACK_LIST { "second-wifi", "second-pass" }
 
 // ------------------------------------------------------------- 服务器 -----
 // 跑 server.py 的那台机器（树莓派 / 软路由 / NAS / 家里的 Linux 主机）。
